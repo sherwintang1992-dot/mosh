@@ -1,4 +1,4 @@
-name: Build Mosh for ARM64 (Kylin)
+name: Build Mosh for ARM64 (Kylin) - Fixed
 
 on: 
   workflow_dispatch:
@@ -6,47 +6,50 @@ on:
 jobs:
   build-arm64:
     runs-on: ubuntu-latest
+    name: Build on aarch64
     
     steps:
-    # 1. 拉取代码
-    - uses: actions/checkout@v3
-    
-    # 2. 启用 QEMU 模拟器 (这是支持 ARM 编译的关键)
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      
-    # 3. 在 ARM64 容器中进行编译
-    # 我们使用 addnab/docker-run-action 在容器内运行命令
-    - name: Build inside ARM64 Container
-      uses: addnab/docker-run-action@v3
-      with:
-        # 使用 Ubuntu 20.04 ARM64 镜像，兼容麒麟 V10
-        image: arm64v8/ubuntu:20.04
-        options: -v ${{ github.workspace }}:/work -w /work
-        run: |
-          echo "正在 ARM64 环境下准备编译环境..."
-          
-          # 更新源并安装依赖 (非交互模式)
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y build-essential automake libtool libprotobuf-dev protobuf-compiler libncurses5-dev zlib1g-dev libssl-dev pkg-config git
-          
-          echo "依赖安装完成，开始修改源码..."
-          
-          # 修改超时时间：将 60000 (1分钟) 改为 600000 (10分钟)
-          # 如果想要 30分钟，就改为 1800000
-          sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
-          
-          echo "源码修改完成，开始编译..."
-          ./autogen.sh
-          ./configure
-          make -j$(nproc)
-          
-          echo "编译完成！"
+      - uses: actions/checkout@v3
 
-    # 4. 上传编译好的文件
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: mosh-server-arm64
-        path: src/frontend/mosh-server
+      # 使用专门的跨架构运行插件
+      - uses: uraimo/run-on-arch-action@v2
+        name: Compile inside ARM64 container
+        id: build
+        with:
+          # 指定目标架构为 aarch64 (即 ARM64)
+          arch: aarch64
+          # 指定系统为 Ubuntu 20.04 (兼容麒麟 V10)
+          distro: ubuntu20.04
+          
+          # 挂载源代码目录
+          githubToken: ${{ github.token }}
+
+          # 在这里编写编译脚本
+          run: |
+            echo "正在初始化 ARM64 环境..."
+            
+            # 1. 安装依赖
+            apt-get update
+            apt-get install -y build-essential automake libtool libprotobuf-dev protobuf-compiler libncurses5-dev zlib1g-dev libssl-dev pkg-config git
+            
+            echo "依赖安装完毕，开始修改源码..."
+            
+            # 2. 修改源码 (将 60秒 改为 600秒/10分钟)
+            # 这里的路径不需要加 src/frontend/ 因为我们就在根目录下
+            sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
+            
+            echo "源码修改完毕，开始编译..."
+            
+            # 3. 编译
+            ./autogen.sh
+            ./configure
+            make -j$(nproc)
+            
+            echo "编译成功！"
+
+      # 上传编译好的文件
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mosh-server-arm64
+          path: src/frontend/mosh-server
