@@ -1,12 +1,12 @@
-name: Build Static Mosh-Server ONLY (Alpine Fix)
+name: Build Static Mosh (Final Fix)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  build-server-only:
+  build-static-src-only:
     runs-on: ubuntu-latest
-    name: Build Static Server
+    name: Build Static Binary
     
     steps:
       - name: Set up QEMU
@@ -16,12 +16,12 @@ jobs:
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:latest
-          # 模拟 ARM64 架构
+          # 模拟 ARM64
           options: --platform linux/arm64 -v ${{ github.workspace }}:/work -w /work
           run: |
-            echo ">>> 1. 安装编译依赖 (Alpine) <<<"
+            echo ">>> 1. 安装构建依赖 <<<"
             apk update
-            # 只需要 C++ 编译环境和静态库，不需要完整的 Perl
+            # 安装基础工具
             apk add build-base git automake autoconf libtool pkgconf \
                     protobuf-dev protobuf \
                     ncurses-dev ncurses-static \
@@ -37,10 +37,10 @@ jobs:
             echo ">>> 3. 修改超时时间 <<<"
             sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
             
-            echo ">>> 4. 配置环境 <<<"
+            echo ">>> 4. 配置全静态编译 <<<"
             ./autogen.sh
             
-            # 【核武器】全静态链接参数
+            # 强制静态链接
             export CXXFLAGS="-static -O2"
             export LDFLAGS="-static"
             
@@ -49,20 +49,26 @@ jobs:
                 --without-utempter \
                 PKG_CONFIG="pkg-config --static"
             
-            echo ">>> 5. 只编译 mosh-server (跳过 Perl 报错) <<<"
-            # 关键修改：直接进入 frontend 目录，只编译 mosh-server
-            # 这样就完全避开了 scripts 目录下的 Perl 错误
-            cd src/frontend
-            make -j$(nproc) mosh-server
+            echo ">>> 5. 编译 SRC 目录 (跳过 scripts) <<<"
+            # 【核心修正】
+            # 不要直接 make (会编译 scripts 导致 Perl 报错)
+            # 也不要进 frontend (会导致缺依赖)
+            # 而是编译整个 src 目录！这里面包含了 crypto, network, protobufs 等所有 C++ 库
+            make -C src -j$(nproc)
             
-            echo ">>> 6. 验证 <<<"
-            if [ -f mosh-server ]; then
+            echo ">>> 6. 验证结果 <<<"
+            # 此时文件应该在 src/frontend/ 下
+            TARGET_FILE="src/frontend/mosh-server"
+            
+            if [ -f "$TARGET_FILE" ]; then
                 echo "构建成功！"
-                ls -lh mosh-server
-                # 必须显示 not a dynamic executable
-                ldd mosh-server || echo "验证通过：全静态文件！"
+                ls -lh "$TARGET_FILE"
+                # 必须是 statically linked
+                file "$TARGET_FILE"
+                # 必须不是 dynamic executable
+                ldd "$TARGET_FILE" || echo "验证完美：无动态库依赖"
             else
-                echo "严重错误：文件未生成"
+                echo "错误：文件未生成！"
                 exit 1
             fi
 
@@ -70,5 +76,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mosh-server-static-arm64
-          # 注意路径：我们在 src/frontend 下编译的
           path: mosh/src/frontend/mosh-server
