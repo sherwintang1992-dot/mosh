@@ -1,52 +1,49 @@
-name: Build Fully Static Mosh (Alpine ARM64 Fixed)
+name: Build Mosh Static (Fixed Source)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  build-static-final:
+  build-static-fixed:
     runs-on: ubuntu-latest
     name: Build Static Binary
     
     steps:
-      - uses: actions/checkout@v3
-
-      # 1. 必须先注册 QEMU 模拟器
+      # 1. 注册 QEMU 模拟器 (用于支持 ARM64)
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      # 2. 运行 Docker 容器
+      # 2. 运行 Alpine 容器进行编译
       - name: Build inside Alpine Container
         uses: addnab/docker-run-action@v3
         with:
-          # 使用官方标准 Alpine 镜像
           image: alpine:latest
-          # 【关键修正】这里加上 --platform linux/arm64
-          # 这告诉 Docker：虽然我在 x86 机器上，但我要你拉取并运行 ARM64 版本的 Alpine
+          # 挂载当前工作目录到容器的 /work
           options: --platform linux/arm64 -v ${{ github.workspace }}:/work -w /work
           run: |
-            echo ">>> 1. 检查当前架构 (必须是 aarch64) <<<"
-            uname -m
-            
-            echo ">>> 2. 安装全静态编译依赖 <<<"
-            # Alpine 的优势：apk add xxx-static 就能直接拿到静态库
+            echo ">>> 1. 安装编译工具和依赖 (Alpine) <<<"
             apk update
+            # 安装 git 和 wget 用于下载源码
             apk add build-base git automake autoconf libtool pkgconf \
                     protobuf-dev protobuf \
                     ncurses-dev ncurses-static \
                     openssl-dev openssl-libs-static \
                     zlib-dev zlib-static \
                     linux-headers
+
+            echo ">>> 2. 下载 Mosh 官方源码 <<<"
+            # 【修复点】主动克隆 mosh 仓库，而不是依赖 checkout
+            rm -rf mosh # 清理旧文件
+            git clone --depth 1 https://github.com/mobile-shell/mosh.git
+            cd mosh
             
-            echo ">>> 3. 准备源码 <<<"
-            # 修改超时限制 60s -> 600s
+            echo ">>> 3. 修改源码 (增加超时时间) <<<"
             sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
             
+            echo ">>> 4. 配置全静态编译参数 <<<"
             ./autogen.sh
             
-            echo ">>> 4. 配置【强制全静态】 <<<"
-            # LDFLAGS="-static" 是核武器，它禁止使用任何 .so 动态库
-            # 所有代码都会被塞进最终的一个文件里
+            # LDFLAGS="-static" 强制把所有库（包括 glibc/musl）都打进二进制文件
             export CXXFLAGS="-static -O2"
             export LDFLAGS="-static"
             
@@ -55,18 +52,25 @@ jobs:
                 --without-utempter \
                 PKG_CONFIG="pkg-config --static"
             
-            echo ">>> 5. 开始编译 <<<"
+            echo ">>> 5. 开始编译 (这可能需要几分钟) <<<"
             make -j$(nproc)
             
-            echo ">>> 6. 最终验证 <<<"
-            echo "文件信息："
-            file src/frontend/mosh-server
-            
-            echo "依赖检查 (应该报错说不是动态文件)："
-            ldd src/frontend/mosh-server || echo "完美！ldd 无法读取，说明没有任何动态依赖！"
+            echo ">>> 6. 验证编译结果 <<<"
+            # 检查文件是否存在
+            if [ -f src/frontend/mosh-server ]; then
+                echo "文件生成成功！"
+                ls -lh src/frontend/mosh-server
+                # 检查是否为静态链接 (应该输出 not a dynamic executable)
+                ldd src/frontend/mosh-server || echo "验证通过：无动态依赖"
+            else
+                echo "错误：编译失败，文件未生成！"
+                exit 1
+            fi
 
+      # 3. 上传文件
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mosh-server-static-arm64-final
-          path: src/frontend/mosh-server
+          name: mosh-server-static-arm64
+          # 【注意】路径要包含 mosh 目录，因为我们是在 mosh 子目录下编译的
+          path: mosh/src/frontend/mosh-server
