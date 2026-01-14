@@ -1,56 +1,87 @@
-name: Build Mosh for ARM64 (Stable)
+name: Build Static Mosh for Kylin (CentOS 7/ARM64)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  build-arm64-stable:
+  build-static-mosh:
     runs-on: ubuntu-latest
-    name: Build on aarch64 (Single Thread)
+    name: Build Static Mosh on CentOS 7 ARM64
     
     steps:
       - uses: actions/checkout@v3
 
+      # 使用 uraimo/run-on-arch-action 模拟 ARM64 环境
       - uses: uraimo/run-on-arch-action@v2
-        name: Compile inside ARM64 container
+        name: Build in CentOS 7 ARM64
         id: build
         with:
           arch: aarch64
-          distro: ubuntu20.04
+          distro: centos7 # 关键！使用 CentOS 7 保证 glibc 兼容性
           githubToken: ${{ github.token }}
           
-          # 【重要】这里使用了 docker run 的参数
-          # 增加 --privileged 可能有助于避免某些 QEMU 错误
+          # 挂载 workspace
           dockerRunArgs: |
             --privileged
 
           run: |
-            echo "1. 初始化环境..."
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update
-            apt-get install -y build-essential automake libtool libprotobuf-dev protobuf-compiler libncurses5-dev zlib1g-dev libssl-dev pkg-config git
+            echo "=== 1. 初始化 CentOS 7 环境 ==="
+            # 修复 CentOS 7 ARM 源的问题 (CentOS 7 已停止维护，需要切换到 Vault 源或 AltArch 源)
+            sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Base.repo
+            sed -i 's|#baseurl=http://mirror.centos.org/altarch/|baseurl=http://vault.centos.org/altarch/|g' /etc/yum.repos.d/CentOS-Base.repo
             
-            echo "2. 修改源码 (60s -> 10min)..."
+            yum makecache
+            yum install -y epel-release
+            
+            # 安装基础编译工具
+            yum install -y gcc-c++ make automake libtool git wget \
+                           openssl-devel zlib-devel ncurses-devel \
+                           pkgconfig
+            
+            echo "=== 2. 编译并安装 Protobuf (静态库) ==="
+            # CentOS 7 自带的 protobuf 太老，Mosh 需要较新版本，且我们需要静态库
+            # 下载 protobuf 2.6.1 (Mosh 官方推荐兼容版本) 或者 3.x
+            # 这里选用 3.6.1 比较稳
+            cd /tmp
+            wget https://github.com/protocolbuffers/protobuf/releases/download/v3.6.1/protobuf-cpp-3.6.1.tar.gz
+            tar -zxvf protobuf-cpp-3.6.1.tar.gz
+            cd protobuf-3.6.1
+            ./autogen.sh
+            # 关键：--disable-shared 强制只生成 .a 静态库
+            ./configure --prefix=/usr/local --disable-shared --enable-static CXXFLAGS="-fPIC"
+            make -j4
+            make install
+            ldconfig
+            
+            echo "=== 3. 准备编译 Mosh ==="
+            cd /home/runner/work/mosh/mosh
+            
+            # 修改超时时间 60s -> 10min
             sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
             
-            echo "3. 配置编译..."
             ./autogen.sh
             
-            # 【关键修改】添加 CXXFLAGS="-O1" 
-            # 降低优化等级，可以显著减少编译器对内存的需求，防止 Error 139
-            ./configure CXXFLAGS="-O1"
+            echo "=== 4. 配置 Mosh (链接静态 Protobuf) ==="
+            # 告诉编译器去哪找我们刚编译的 protobuf
+            export PROTOC=/usr/local/bin/protoc
+            export protobuf_CFLAGS="-I/usr/local/include"
+            export protobuf_LIBS="-L/usr/local/lib -lprotobuf -pthread"
             
-            echo "4. 开始编译 (单线程模式)..."
-            echo "请耐心等待，单线程编译在模拟器下较慢，预计需要 15-20 分钟..."
+            # 尝试尽可能静态链接
+            # LDFLAGS="-static" 在 glibc 环境下非常危险（会导致 getaddrinfo 等网络功能失效）
+            # 所以我们只对 mosh 自己的依赖做静态，系统库依然动态（但基于 CentOS 7 应该没问题）
+            ./configure --enable-static-protobuf
             
-            # 【关键修改】使用 -j1 强制单线程
-            # 之前的 crash 就是因为多线程并发把模拟器内存撑爆了
-            make -j1
+            echo "=== 5. 开始编译 Mosh ==="
+            make -j2
             
-            echo "编译成功！"
+            # 验证生成的文件信息
+            echo "=== 检查二进制文件依赖 ==="
+            ldd src/frontend/mosh-server || true
+            ls -lh src/frontend/mosh-server
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mosh-server-arm64-kylin
+          name: mosh-server-centos7-arm64
           path: src/frontend/mosh-server
