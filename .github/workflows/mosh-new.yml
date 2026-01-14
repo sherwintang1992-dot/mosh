@@ -1,10 +1,10 @@
-name: Build Static Mosh (Makefile Hack)
+name: Build Static Mosh (Root Make Fix)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  build-static-final-hack:
+  build-static-absolute:
     runs-on: ubuntu-latest
     name: Build Static Binary
     
@@ -18,7 +18,7 @@ jobs:
           image: alpine:latest
           options: --platform linux/arm64 -v ${{ github.workspace }}:/work -w /work
           run: |
-            echo ">>> 1. 安装构建环境 (Alpine ARM64) <<<"
+            echo ">>> 1. 准备环境 (Alpine ARM64) <<<"
             apk update
             apk add build-base git automake autoconf libtool pkgconf \
                     protobuf-dev protobuf \
@@ -27,21 +27,26 @@ jobs:
                     zlib-dev zlib-static \
                     linux-headers
 
-            echo ">>> 2. 获取源码 <<<"
+            echo ">>> 2. 下载 Mosh 源码 <<<"
             rm -rf mosh
             git clone --depth 1 https://github.com/mobile-shell/mosh.git
             cd mosh
             
-            echo ">>> 3. 修改源码 (60s -> 600s 超时) <<<"
-            sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
+            echo ">>> 3. 手动生成版本文件 (防止依赖丢失) <<<"
+            # 这一步手动创建 VERSION.stamp，彻底杜绝 "No rule to make target" 错误
+            ./gen-version.sh > VERSION.stamp
+            cat VERSION.stamp
             
-            echo ">>> 4. 【关键】修改构建清单，剔除 scripts <<<"
-            # 默认的 SUBDIRS 包含了 src scripts man 等
-            # 我们强制把它改成只编译 src
-            # 这样运行根目录 make 时，会生成 VERSION.stamp，但不会进入 scripts 目录
+            echo ">>> 4. 阉割构建列表 (剔除 Perl 脚本) <<<"
+            # 修改 Makefile.am，只保留 src 目录
+            # 这样 make 就不会去编译 scripts(Perl) 和 man(文档)
+            sed -i 's/SUBDIRS = src scripts man/SUBDIRS = src/g' Makefile.am
             sed -i 's/SUBDIRS = .*/SUBDIRS = src/g' Makefile.am
             
-            echo ">>> 5. 配置全静态编译 <<<"
+            echo ">>> 5. 修改超时时间 <<<"
+            sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
+            
+            echo ">>> 6. 配置环境 (全静态) <<<"
             ./autogen.sh
             
             export CXXFLAGS="-static -O2"
@@ -52,30 +57,31 @@ jobs:
                 --without-utempter \
                 PKG_CONFIG="pkg-config --static"
             
-            echo ">>> 6. 开始编译 (从根目录) <<<"
-            # 现在可以放心地在根目录 make 了
+            echo ">>> 7. 开始编译 (从根目录) <<<"
+            # 因为我们在第4步修改了 SUBDIRS，这里 make 只会编译 src，不会报错
             make -j$(nproc)
             
-            echo ">>> 7. 验证结果 <<<"
+            echo ">>> 8. 验证产物 <<<"
             TARGET="src/frontend/mosh-server"
+            
             if [ -f "$TARGET" ]; then
-                echo "构建成功！文件信息："
+                echo "✅ 编译成功！"
                 ls -lh "$TARGET"
                 file "$TARGET"
-                # 检查静态性
+                # 再次确认是静态文件
                 if ldd "$TARGET" 2>&1 | grep -q "not a dynamic executable"; then
-                    echo "✅ 完美验证：是全静态文件 (Not a dynamic executable)"
+                     echo "🏆 完美：文件是全静态的 (Fully Static)"
                 else
-                    echo "⚠️ 警告：检测到动态依赖"
-                    ldd "$TARGET"
+                     echo "⚠️ 警告：发现动态依赖"
+                     ldd "$TARGET"
                 fi
             else
-                echo "❌ 错误：文件未生成"
+                echo "❌ 失败：文件未生成"
                 exit 1
             fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mosh-server-static-arm64-kylin
+          name: mosh-server-static-arm64-stable
           path: mosh/src/frontend/mosh-server
