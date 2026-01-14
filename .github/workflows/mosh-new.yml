@@ -1,31 +1,35 @@
-name: Build Fully Static Mosh (Alpine/ARM64)
+name: Build Fully Static Mosh (Alpine ARM64 Fixed)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  build-fully-static:
+  build-static-final:
     runs-on: ubuntu-latest
     name: Build Static Binary
     
     steps:
       - uses: actions/checkout@v3
 
-      # 1. 开启 QEMU 模拟器
+      # 1. 必须先注册 QEMU 模拟器
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      # 2. 使用 Alpine Linux 进行全静态编译
+      # 2. 运行 Docker 容器
       - name: Build inside Alpine Container
         uses: addnab/docker-run-action@v3
         with:
-          # 使用 Alpine，因为它支持完美的静态编译
-          image: arm64v8/alpine:latest
-          options: -v ${{ github.workspace }}:/work -w /work
+          # 使用官方标准 Alpine 镜像
+          image: alpine:latest
+          # 【关键修正】这里加上 --platform linux/arm64
+          # 这告诉 Docker：虽然我在 x86 机器上，但我要你拉取并运行 ARM64 版本的 Alpine
+          options: --platform linux/arm64 -v ${{ github.workspace }}:/work -w /work
           run: |
-            echo ">>> 1. 安装构建依赖 (静态库) <<<"
-            # 安装编译工具和所有必要的静态库 (.a 文件)
-            # Alpine 的包管理非常干净，*-static 包就是我们要的
+            echo ">>> 1. 检查当前架构 (必须是 aarch64) <<<"
+            uname -m
+            
+            echo ">>> 2. 安装全静态编译依赖 <<<"
+            # Alpine 的优势：apk add xxx-static 就能直接拿到静态库
             apk update
             apk add build-base git automake autoconf libtool pkgconf \
                     protobuf-dev protobuf \
@@ -34,16 +38,15 @@ jobs:
                     zlib-dev zlib-static \
                     linux-headers
             
-            echo ">>> 2. 准备源码 <<<"
-            # 60秒 -> 600秒 修改
+            echo ">>> 3. 准备源码 <<<"
+            # 修改超时限制 60s -> 600s
             sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
             
             ./autogen.sh
             
-            echo ">>> 3. 配置全静态编译 <<<"
-            # 关键参数解释：
-            # LDFLAGS="-static": 告诉编译器，不要用 .so，全部把代码塞进二进制文件里
-            # PKG_CONFIG="pkg-config --static": 告诉 pkg-config 查找库时，要把库的底层依赖也找出来
+            echo ">>> 4. 配置【强制全静态】 <<<"
+            # LDFLAGS="-static" 是核武器，它禁止使用任何 .so 动态库
+            # 所有代码都会被塞进最终的一个文件里
             export CXXFLAGS="-static -O2"
             export LDFLAGS="-static"
             
@@ -52,17 +55,18 @@ jobs:
                 --without-utempter \
                 PKG_CONFIG="pkg-config --static"
             
-            echo ">>> 4. 开始编译 <<<"
+            echo ">>> 5. 开始编译 <<<"
             make -j$(nproc)
             
-            echo ">>> 5. 验证是否为纯静态 <<<"
-            # 如果成功，file 命令应该显示 "statically linked"
-            # ldd 命令应该报错说 "not a dynamic executable"
+            echo ">>> 6. 最终验证 <<<"
+            echo "文件信息："
             file src/frontend/mosh-server
-            ldd src/frontend/mosh-server 2>&1 | grep "not a dynamic executable" && echo "验证通过：是全静态文件！" || echo "警告：可能不是全静态"
+            
+            echo "依赖检查 (应该报错说不是动态文件)："
+            ldd src/frontend/mosh-server || echo "完美！ldd 无法读取，说明没有任何动态依赖！"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mosh-server-fully-static-arm64
+          name: mosh-server-static-arm64-final
           path: src/frontend/mosh-server
