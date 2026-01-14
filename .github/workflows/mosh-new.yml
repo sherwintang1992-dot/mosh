@@ -1,10 +1,10 @@
-name: Build Static Mosh (Final Fix)
+name: Build Static Mosh (Makefile Hack)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  build-static-src-only:
+  build-static-final-hack:
     runs-on: ubuntu-latest
     name: Build Static Binary
     
@@ -16,12 +16,10 @@ jobs:
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:latest
-          # 模拟 ARM64
           options: --platform linux/arm64 -v ${{ github.workspace }}:/work -w /work
           run: |
-            echo ">>> 1. 安装构建依赖 <<<"
+            echo ">>> 1. 安装构建环境 (Alpine ARM64) <<<"
             apk update
-            # 安装基础工具
             apk add build-base git automake autoconf libtool pkgconf \
                     protobuf-dev protobuf \
                     ncurses-dev ncurses-static \
@@ -34,13 +32,18 @@ jobs:
             git clone --depth 1 https://github.com/mobile-shell/mosh.git
             cd mosh
             
-            echo ">>> 3. 修改超时时间 <<<"
+            echo ">>> 3. 修改源码 (60s -> 600s 超时) <<<"
             sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
             
-            echo ">>> 4. 配置全静态编译 <<<"
+            echo ">>> 4. 【关键】修改构建清单，剔除 scripts <<<"
+            # 默认的 SUBDIRS 包含了 src scripts man 等
+            # 我们强制把它改成只编译 src
+            # 这样运行根目录 make 时，会生成 VERSION.stamp，但不会进入 scripts 目录
+            sed -i 's/SUBDIRS = .*/SUBDIRS = src/g' Makefile.am
+            
+            echo ">>> 5. 配置全静态编译 <<<"
             ./autogen.sh
             
-            # 强制静态链接
             export CXXFLAGS="-static -O2"
             export LDFLAGS="-static"
             
@@ -49,31 +52,30 @@ jobs:
                 --without-utempter \
                 PKG_CONFIG="pkg-config --static"
             
-            echo ">>> 5. 编译 SRC 目录 (跳过 scripts) <<<"
-            # 【核心修正】
-            # 不要直接 make (会编译 scripts 导致 Perl 报错)
-            # 也不要进 frontend (会导致缺依赖)
-            # 而是编译整个 src 目录！这里面包含了 crypto, network, protobufs 等所有 C++ 库
-            make -C src -j$(nproc)
+            echo ">>> 6. 开始编译 (从根目录) <<<"
+            # 现在可以放心地在根目录 make 了
+            make -j$(nproc)
             
-            echo ">>> 6. 验证结果 <<<"
-            # 此时文件应该在 src/frontend/ 下
-            TARGET_FILE="src/frontend/mosh-server"
-            
-            if [ -f "$TARGET_FILE" ]; then
-                echo "构建成功！"
-                ls -lh "$TARGET_FILE"
-                # 必须是 statically linked
-                file "$TARGET_FILE"
-                # 必须不是 dynamic executable
-                ldd "$TARGET_FILE" || echo "验证完美：无动态库依赖"
+            echo ">>> 7. 验证结果 <<<"
+            TARGET="src/frontend/mosh-server"
+            if [ -f "$TARGET" ]; then
+                echo "构建成功！文件信息："
+                ls -lh "$TARGET"
+                file "$TARGET"
+                # 检查静态性
+                if ldd "$TARGET" 2>&1 | grep -q "not a dynamic executable"; then
+                    echo "✅ 完美验证：是全静态文件 (Not a dynamic executable)"
+                else
+                    echo "⚠️ 警告：检测到动态依赖"
+                    ldd "$TARGET"
+                fi
             else
-                echo "错误：文件未生成！"
+                echo "❌ 错误：文件未生成"
                 exit 1
             fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mosh-server-static-arm64
+          name: mosh-server-static-arm64-kylin
           path: mosh/src/frontend/mosh-server
