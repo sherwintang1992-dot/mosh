@@ -1,55 +1,56 @@
-name: Build Mosh for ARM64 (Kylin) - Fixed
+name: Build Mosh for ARM64 (Stable)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  build-arm64:
+  build-arm64-stable:
     runs-on: ubuntu-latest
-    name: Build on aarch64
+    name: Build on aarch64 (Single Thread)
     
     steps:
       - uses: actions/checkout@v3
 
-      # 使用专门的跨架构运行插件
       - uses: uraimo/run-on-arch-action@v2
         name: Compile inside ARM64 container
         id: build
         with:
-          # 指定目标架构为 aarch64 (即 ARM64)
           arch: aarch64
-          # 指定系统为 Ubuntu 20.04 (兼容麒麟 V10)
           distro: ubuntu20.04
-          
-          # 挂载源代码目录
           githubToken: ${{ github.token }}
+          
+          # 【重要】这里使用了 docker run 的参数
+          # 增加 --privileged 可能有助于避免某些 QEMU 错误
+          dockerRunArgs: |
+            --privileged
 
-          # 在这里编写编译脚本
           run: |
-            echo "正在初始化 ARM64 环境..."
-            
-            # 1. 安装依赖
+            echo "1. 初始化环境..."
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install -y build-essential automake libtool libprotobuf-dev protobuf-compiler libncurses5-dev zlib1g-dev libssl-dev pkg-config git
             
-            echo "依赖安装完毕，开始修改源码..."
-            
-            # 2. 修改源码 (将 60秒 改为 600秒/10分钟)
-            # 这里的路径不需要加 src/frontend/ 因为我们就在根目录下
+            echo "2. 修改源码 (60s -> 10min)..."
             sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
             
-            echo "源码修改完毕，开始编译..."
-            
-            # 3. 编译
+            echo "3. 配置编译..."
             ./autogen.sh
-            ./configure
-            make -j$(nproc)
+            
+            # 【关键修改】添加 CXXFLAGS="-O1" 
+            # 降低优化等级，可以显著减少编译器对内存的需求，防止 Error 139
+            ./configure CXXFLAGS="-O1"
+            
+            echo "4. 开始编译 (单线程模式)..."
+            echo "请耐心等待，单线程编译在模拟器下较慢，预计需要 15-20 分钟..."
+            
+            # 【关键修改】使用 -j1 强制单线程
+            # 之前的 crash 就是因为多线程并发把模拟器内存撑爆了
+            make -j1
             
             echo "编译成功！"
 
-      # 上传编译好的文件
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mosh-server-arm64
+          name: mosh-server-arm64-kylin
           path: src/frontend/mosh-server
