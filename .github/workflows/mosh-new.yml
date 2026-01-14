@@ -1,87 +1,68 @@
-name: Build Static Mosh for Kylin (CentOS 7/ARM64)
+name: Build Fully Static Mosh (Alpine/ARM64)
 
 on: 
   workflow_dispatch:
 
 jobs:
-  build-static-mosh:
+  build-fully-static:
     runs-on: ubuntu-latest
-    name: Build Static Mosh on CentOS 7 ARM64
+    name: Build Static Binary
     
     steps:
       - uses: actions/checkout@v3
 
-      # 使用 uraimo/run-on-arch-action 模拟 ARM64 环境
-      - uses: uraimo/run-on-arch-action@v2
-        name: Build in CentOS 7 ARM64
-        id: build
-        with:
-          arch: aarch64
-          distro: centos7 # 关键！使用 CentOS 7 保证 glibc 兼容性
-          githubToken: ${{ github.token }}
-          
-          # 挂载 workspace
-          dockerRunArgs: |
-            --privileged
+      # 1. 开启 QEMU 模拟器
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
+      # 2. 使用 Alpine Linux 进行全静态编译
+      - name: Build inside Alpine Container
+        uses: addnab/docker-run-action@v3
+        with:
+          # 使用 Alpine，因为它支持完美的静态编译
+          image: arm64v8/alpine:latest
+          options: -v ${{ github.workspace }}:/work -w /work
           run: |
-            echo "=== 1. 初始化 CentOS 7 环境 ==="
-            # 修复 CentOS 7 ARM 源的问题 (CentOS 7 已停止维护，需要切换到 Vault 源或 AltArch 源)
-            sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Base.repo
-            sed -i 's|#baseurl=http://mirror.centos.org/altarch/|baseurl=http://vault.centos.org/altarch/|g' /etc/yum.repos.d/CentOS-Base.repo
+            echo ">>> 1. 安装构建依赖 (静态库) <<<"
+            # 安装编译工具和所有必要的静态库 (.a 文件)
+            # Alpine 的包管理非常干净，*-static 包就是我们要的
+            apk update
+            apk add build-base git automake autoconf libtool pkgconf \
+                    protobuf-dev protobuf \
+                    ncurses-dev ncurses-static \
+                    openssl-dev openssl-libs-static \
+                    zlib-dev zlib-static \
+                    linux-headers
             
-            yum makecache
-            yum install -y epel-release
-            
-            # 安装基础编译工具
-            yum install -y gcc-c++ make automake libtool git wget \
-                           openssl-devel zlib-devel ncurses-devel \
-                           pkgconfig
-            
-            echo "=== 2. 编译并安装 Protobuf (静态库) ==="
-            # CentOS 7 自带的 protobuf 太老，Mosh 需要较新版本，且我们需要静态库
-            # 下载 protobuf 2.6.1 (Mosh 官方推荐兼容版本) 或者 3.x
-            # 这里选用 3.6.1 比较稳
-            cd /tmp
-            wget https://github.com/protocolbuffers/protobuf/releases/download/v3.6.1/protobuf-cpp-3.6.1.tar.gz
-            tar -zxvf protobuf-cpp-3.6.1.tar.gz
-            cd protobuf-3.6.1
-            ./autogen.sh
-            # 关键：--disable-shared 强制只生成 .a 静态库
-            ./configure --prefix=/usr/local --disable-shared --enable-static CXXFLAGS="-fPIC"
-            make -j4
-            make install
-            ldconfig
-            
-            echo "=== 3. 准备编译 Mosh ==="
-            cd /home/runner/work/mosh/mosh
-            
-            # 修改超时时间 60s -> 10min
+            echo ">>> 2. 准备源码 <<<"
+            # 60秒 -> 600秒 修改
             sed -i 's/now - start_time > 60000/now - start_time > 600000/g' src/frontend/mosh-server.cc
             
             ./autogen.sh
             
-            echo "=== 4. 配置 Mosh (链接静态 Protobuf) ==="
-            # 告诉编译器去哪找我们刚编译的 protobuf
-            export PROTOC=/usr/local/bin/protoc
-            export protobuf_CFLAGS="-I/usr/local/include"
-            export protobuf_LIBS="-L/usr/local/lib -lprotobuf -pthread"
+            echo ">>> 3. 配置全静态编译 <<<"
+            # 关键参数解释：
+            # LDFLAGS="-static": 告诉编译器，不要用 .so，全部把代码塞进二进制文件里
+            # PKG_CONFIG="pkg-config --static": 告诉 pkg-config 查找库时，要把库的底层依赖也找出来
+            export CXXFLAGS="-static -O2"
+            export LDFLAGS="-static"
             
-            # 尝试尽可能静态链接
-            # LDFLAGS="-static" 在 glibc 环境下非常危险（会导致 getaddrinfo 等网络功能失效）
-            # 所以我们只对 mosh 自己的依赖做静态，系统库依然动态（但基于 CentOS 7 应该没问题）
-            ./configure --enable-static-protobuf
+            ./configure \
+                --enable-static-protobuf \
+                --without-utempter \
+                PKG_CONFIG="pkg-config --static"
             
-            echo "=== 5. 开始编译 Mosh ==="
-            make -j2
+            echo ">>> 4. 开始编译 <<<"
+            make -j$(nproc)
             
-            # 验证生成的文件信息
-            echo "=== 检查二进制文件依赖 ==="
-            ldd src/frontend/mosh-server || true
-            ls -lh src/frontend/mosh-server
+            echo ">>> 5. 验证是否为纯静态 <<<"
+            # 如果成功，file 命令应该显示 "statically linked"
+            # ldd 命令应该报错说 "not a dynamic executable"
+            file src/frontend/mosh-server
+            ldd src/frontend/mosh-server 2>&1 | grep "not a dynamic executable" && echo "验证通过：是全静态文件！" || echo "警告：可能不是全静态"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mosh-server-centos7-arm64
+          name: mosh-server-fully-static-arm64
           path: src/frontend/mosh-server
